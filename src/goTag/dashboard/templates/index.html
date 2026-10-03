@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>goTag scenario dashboard</title>
+  <style>
+    /* Minimal styling only -- this is a tinkering tool, not a product UI. */
+    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+    h1 { margin-bottom: 0.2rem; }
+    .subtitle { color: #666; margin-top: 0; }
+    fieldset { margin-bottom: 1.2rem; border: 1px solid #ddd; border-radius: 6px; }
+    legend { font-weight: 600; padding: 0 0.4rem; }
+    label { display: block; margin-top: 0.6rem; font-weight: 500; }
+    .help { color: #777; font-size: 0.85rem; margin: 0.1rem 0 0.2rem 0; }
+    input[type=text] { width: 220px; padding: 0.3rem; }
+    .deltav-row { display: flex; gap: 1.5rem; flex-wrap: wrap; }
+    .deltav-row > div { flex: 1; min-width: 150px; }
+    button { margin-top: 1rem; padding: 0.6rem 1.4rem; font-size: 1rem; cursor: pointer; }
+    .error { background: #fdecea; border: 1px solid #f5c2c0; border-radius: 6px; padding: 1rem; white-space: pre-wrap; font-family: monospace; font-size: 0.8rem; }
+    .headline table { border-collapse: collapse; margin-top: 0.5rem; }
+    .headline td, .headline th { padding: 0.3rem 0.8rem; border-bottom: 1px solid #eee; text-align: left; }
+    .plot { margin: 1.2rem 0; }
+    .plot img { max-width: 100%; border: 1px solid #eee; border-radius: 4px; }
+    .running-note { color: #888; font-size: 0.85rem; }
+    /* Three top-level panes: each is its own visually distinct section so
+       the page reads as "setup", "look at the orbits", "radio signal
+       comparison (not built yet)" rather than one undifferentiated blob. */
+    .pane { border: 2px solid #ccc; border-radius: 8px; padding: 1rem 1.2rem; margin-bottom: 1.5rem; }
+    .pane > h2 { margin-top: 0; }
+    .pane-note { color: #555; }
+    .placeholder-pane { background: #fafafa; color: #666; }
+    .placeholder-pane code { background: #eee; padding: 0.1rem 0.3rem; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h1>goTag scenario dashboard</h1>
+  <p class="subtitle">
+    Simulates two satellites that start at the same point and position but diverge after a small
+    velocity nudge (delta-v) -- e.g. a cubesat ejection -- and shows what a ground sensor would see:
+    how far apart they get (km), how far apart they LOOK in the sky (deg), and how their RF signals
+    Doppler-shift differently over time.
+  </p>
+
+  <!--
+    Pane 1 -- Variable setup. Single form, one input per ScenarioParams
+    field. Submitting re-runs the whole scenario server-side (see app.py:
+    _parse_params / run_scenario) and the page re-renders with Pane 2's
+    plots appended below.
+  -->
+  <section class="pane">
+  <h2>Pane 1 -- Variable setup</h2>
+  <form method="post">
+    <fieldset>
+      <legend>Delta-v (km/s) -- the velocity nudge that creates the companion object</legend>
+      <p class="help">
+        Realistic values are roughly 0.001-0.01 km/s (1-10 m/s) in magnitude, e.g. a cubesat
+        ejection or small debris-separation event. Position starts identical for both objects;
+        only velocity changes at t=0.
+      </p>
+      <div class="deltav-row">
+        <div>
+          <label for="delta_v_dx">dx (km/s)</label>
+          <input type="text" id="delta_v_dx" name="delta_v_dx" value="{{ form_values['delta_v_dx'] }}">
+        </div>
+        <div>
+          <label for="delta_v_dy">dy (km/s)</label>
+          <input type="text" id="delta_v_dy" name="delta_v_dy" value="{{ form_values['delta_v_dy'] }}">
+        </div>
+        <div>
+          <label for="delta_v_dz">dz (km/s)</label>
+          <input type="text" id="delta_v_dz" name="delta_v_dz" value="{{ form_values['delta_v_dz'] }}">
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Scenario parameters</legend>
+      {% for name, default, label, help in scalar_fields %}
+      <label for="{{ name }}">{{ label }}</label>
+      <p class="help">{{ help }}</p>
+      <input type="text" id="{{ name }}" name="{{ name }}" value="{{ form_values[name] }}">
+      {% endfor %}
+    </fieldset>
+
+    <button type="submit">Run scenario</button>
+    <p class="running-note">
+      Running fetches a live ISS TLE from CelesTrak and numerically propagates both objects --
+      this typically takes a few seconds. The page will simply pause until it's done; that's expected.
+    </p>
+  </form>
+
+  {% if error %}
+    <h2>Scenario failed</h2>
+    <div class="error">{{ error }}</div>
+  {% endif %}
+
+  {% if headline %}
+    <h2>Headline numbers</h2>
+    <div class="headline">
+      <table>
+        <tr><th></th><th>Min</th><th>Max</th></tr>
+        <tr>
+          <!-- The straight-line distance between the two objects themselves
+               (not their distance from the ground site). Smaller = the
+               objects are harder to tell apart in this window. -->
+          <td>Range between objects (km)</td>
+          <td>{{ "%.3f"|format(headline.min_range_km) }}</td>
+          <td>{{ "%.3f"|format(headline.max_range_km) }}</td>
+        </tr>
+        <tr>
+          <!-- How far apart the two objects appear in the ground site's
+               sky (an angle), not their physical separation in km. -->
+          <td>Angular separation (deg)</td>
+          <td>{{ "%.4f"|format(headline.min_angular_separation_deg) }}</td>
+          <td>{{ "%.4f"|format(headline.max_angular_separation_deg) }}</td>
+        </tr>
+        <tr>
+          <!-- Peak frequency shift each object's downlink would show due
+               to relative motion -- a stand-in physics signal for "could
+               an RF sensor tell these two apart by their Doppler track". -->
+          <td>Max |Doppler shift|, primary (Hz)</td>
+          <td colspan="2">{{ "%.2f"|format(headline.max_abs_doppler_primary_hz) }}</td>
+        </tr>
+        <tr>
+          <td>Max |Doppler shift|, companion (Hz)</td>
+          <td colspan="2">{{ "%.2f"|format(headline.max_abs_doppler_companion_hz) }}</td>
+        </tr>
+      </table>
+    </div>
+  {% endif %}
+
+  {% if plots %}
+    <h2>Plots</h2>
+    <div class="plot">
+      <img src="data:image/png;base64,{{ plots.range }}" alt="Range between objects over time">
+    </div>
+    <div class="plot">
+      <img src="data:image/png;base64,{{ plots.angular }}" alt="Angular separation over time">
+    </div>
+    <div class="plot">
+      <img src="data:image/png;base64,{{ plots.doppler }}" alt="Doppler shift of both objects over time">
+    </div>
+  {% endif %}
+  </section>
+
+  <!--
+    Pane 2 -- Real + simulated orbit view. Shows the actual spatial
+    trajectories (primary_position_km / companion_position_km from
+    ScenarioResult), not just the derived scalar metrics in Pane 1's
+    results. See app.py:_make_orbit_plots for the full reasoning behind
+    the 2D-relative-plot-as-priority / 3D-absolute-plot-as-orientation
+    design choice.
+  -->
+  <section class="pane">
+  <h2>Pane 2 -- Real + simulated orbit view</h2>
+  <p class="pane-note">
+    The primary object's track is the REAL ISS trajectory (live TLE, propagated with SGP4).
+    The companion object's track is SIMULATED (derived by applying a small delta-v to the
+    primary's velocity at t=0, then propagated with a simple two-body integrator). Both are
+    labeled explicitly in the plots below so it's never ambiguous which line is which.
+  </p>
+  {% if plots %}
+    <div class="plot">
+      <img src="data:image/png;base64,{{ plots.orbit_relative }}" alt="Companion position relative to primary, over time">
+      <p class="pane-note">
+        <strong>Priority plot.</strong> This is the companion's position MINUS the primary's
+        position, in km, at each timestep -- i.e. "if you were sitting on the real ISS, where
+        would the simulated companion appear to be, and how does that change over time?" Both
+        objects start exactly coincident (origin, marked with an X) and the companion drifts
+        away as the simulation progresses (color = elapsed time). This is the view that
+        actually shows the divergence this project studies -- a few km of drift is invisible
+        in absolute orbital coordinates (see the plot below), so we zoom into the relative
+        frame instead.
+      </p>
+    </div>
+    <div class="plot">
+      <img src="data:image/png;base64,{{ plots.orbit_absolute }}" alt="Absolute 3D orbit of both objects in ECI frame">
+      <p class="pane-note">
+        Absolute orbit in Earth-Centered-Inertial (ECI) coordinates, for orientation ("yes,
+        this is a real orbit around Earth"). Real (ISS, SGP4) is solid blue; Simulated
+        (companion, two-body + &Delta;v) is dashed red. At LEO scale (~7000 km from Earth's
+        center) a few km of separation is visually imperceptible, so the two tracks will look
+        like they overlap -- that's expected, and is exactly why the relative-position plot
+        above exists.
+      </p>
+    </div>
+  {% else %}
+    <p class="pane-note">Run a scenario in Pane 1 to generate the orbit-view plots.</p>
+  {% endif %}
+  </section>
+
+  <!--
+    Pane 3 -- Radio signal evaluation. Not yet implemented; this is a
+    structural placeholder only, so the 3-pane layout exists now and this
+    pane can be filled in later without re-plumbing the page layout again.
+  -->
+  <section class="pane placeholder-pane">
+  <h2>Pane 3 -- Radio signal evaluation</h2>
+  <p class="pane-note">
+    Not yet set up. This pane will eventually show the comparison between the real and
+    simulated radio-signature evaluation for these two objects -- see
+    <code>docs/JEV_INTEGRATION.md</code> and <code>docs/V1.md</code> for the design and scope
+    of that work. No functionality here yet; this section exists so the dashboard's layout
+    doesn't need to be restructured again once that work lands.
+  </p>
+  </section>
+
+</body>
+</html>
